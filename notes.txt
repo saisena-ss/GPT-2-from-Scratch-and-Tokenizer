@@ -1,0 +1,8 @@
+Why tokenization is important? Because it breaks the words into small pieces to understand more nuances of the language and it can better handle new or unusual 
+words by understanding fundamental building blocks.
+GPT models have limited context window while calculating attention - example: 1024. If vocabulary is stretched generating more 
+tokens then context might be lost due to limited context window.
+Why GPT2 fails with python code? Because it considers each space as separate token which bloats up the number of tokens and 
+run out of context. ( tiktokenizer.vercel.app )
+
+Strings are sequence of immutable unicode code points in python.

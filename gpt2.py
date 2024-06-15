@@ -5,6 +5,9 @@ from torch.nn import functional as F
 import math
 import inspect
 import time
+import os
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
 
 @dataclass
 class GPTconfig:
@@ -223,51 +226,80 @@ import tiktoken
 
 #implement dataloader
 class DataLoaderLite():
-    def __init__(self,B,T):
+    def __init__(self,B,T,process_rank,num_processes):
         self.B = B
         self.T = T
+        self.process_rank = process_rank
+        self.num_processes = num_processes
+        
         with open('input.txt','r') as f:
             text = f.read()
         enc = tiktoken.get_encoding('gpt2')
         self.tokens = torch.tensor(enc.encode(text))
-        self.current_position = 0
-    
+        
+        self.current_position = self.B * self.T * process_rank
+        
+        
     def next_batch(self):
         B,T = self.B, self.T
         buf = self.tokens[self.current_position:self.current_position+(B*T)+1]
         # buf = buf.to(device)
         x = buf[:-1].view(B,T)
         y = buf[1:].view(B,T)
-        self.current_position += B*T
-        if self.current_position + (B*T) + 1 > len(self.tokens):
-            self.current_position = 0
+        self.current_position += B*T*self.num_processes
+        if self.current_position + (B*T*self.num_processes) + 1 > len(self.tokens):
+            self.current_position = self.B * self.T * self.process_rank #0
         
         return x,y
     
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-  
+# ----------------------------------------------
+# 
+
+#data parallel
+from torch.distributed import init_process_group, destroy_process_group
+
+ddp = int(os.environ.get('RANK',-1)) != -1
+if ddp:
+    assert torch.cuda.is_available()
+    init_process_group(backend='nccl')
+    ddp_rank = int(os.environ['RANK'])
+    ddp_local_rank = int(os.environ['LOCAL_RANk'])
+    ddp_world_size = int(os.environ['WORLD_SIZE'])
+    device = f'cuda:{ddp_local_rank}'
+    torch.cuda.set_device(device)
+    master_process = ddp_rank == 0
+else:
+    ddp_rank = 0
+    ddp_local_rank = 0
+    ddp_world_size = 1
+    master_process = True
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'    
+
 torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)    
-
-torch.set_float32_matmul_precision('high')
 
 
 total_batch_size = 524288 #2**19 tokens
 B = 16
 T = 1024
-assert total_batch_size % (B*T) == 0, "make sure total_batch_size is divisible by B*T"
-grad_accum_steps = total_batch_size//(B*T)
-print(f"grad_accum_steps:{grad_accum_steps}")
+assert total_batch_size % (B*T*ddp_world_size) == 0, "make sure total_batch_size is divisible by B*T*ddp_world_size"
+grad_accum_steps = total_batch_size//(B * T * ddp_world_size)
+if master_process:
+    print(f"grad_accum_steps:{grad_accum_steps}")
 
-train_loader = DataLoaderLite(B=B,T=T)
+train_loader = DataLoaderLite(B=B,T=T,process_rank=ddp_rank,num_processes=ddp_world_size)
 
+torch.set_float32_matmul_precision('high')
 # model = GPT.from_pretrained('gpt2')
 model = GPT(GPTconfig(vocab_size=50304))
 
 
 model.to(device)
+
+if ddp:
+    model = DDP(model,device_ids = [ddp_local_rank])
 # model = torch.compile(model)
 
 
@@ -306,7 +338,12 @@ for step in range(max_steps):
             logits,loss = model(x,y)
         loss = loss/grad_accum_steps
         loss_accum += loss.detach()
+        if ddp:
+            model.require_backward_grad_sync = (micro_step == grad_accum_steps-1)
         loss.backward()
+    
+    if ddp:
+        dist.all_reduce(loss_accum,op=dist.ReduceOp.AVG)
         
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(),1.0)
     lr = get_lr(step)
@@ -317,8 +354,11 @@ for step in range(max_steps):
     torch.cuda.synchronize()
     t1= time.time()
     dt = t1-t0
-    print(f"step {step} dt:{dt*1000:.2f}ms loss:{loss_accum.item():.6f}")
-    
+    if master_process:
+        print(f"step {step} dt:{dt*1000:.2f}ms loss:{loss_accum.item():.6f}")
+
+if ddp:
+    destroy_process_group()
 #get logits
 # logits,loss = model(x,y)
 # print(loss)
@@ -327,6 +367,8 @@ num_return_sequences = 5
 max_length = 30
 
 import sys;sys.exit(0)
+
+#torchrun --standalone --nproc_per_node = 8 gpt2.py
 model.eval()
 
 tokens = enc.encode("Hello, I'm a language model,")

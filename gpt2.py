@@ -4,6 +4,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 import math
 import inspect
+import time
 
 @dataclass
 class GPTconfig:
@@ -242,7 +243,7 @@ class DataLoaderLite():
         
         return x,y
     
-train_loader = DataLoaderLite(B=4,T=32)
+train_loader = DataLoaderLite(B=16,T=1024)
 
 torch.manual_seed(1337)
 if torch.cuda.is_available():
@@ -254,7 +255,7 @@ torch.set_float32_matmul_precision('high')
 model = GPT(GPTconfig(vocab_size=50304))
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 model.to(device)
-model = torch.compile(model)
+# model = torch.compile(model)
 
 
 max_steps = 50
@@ -279,11 +280,12 @@ def get_lr(it):
     return min_lr + coeff * (max_lr - min_lr)
 
 for step in range(max_steps):
+    t0 = time.time()
     x,y = train_loader.next_batch()
     x = x.to(device)
     y = y.to(device)
     optimizer.zero_grad()
-    with torch.autocast(device_type=device,dtype=torch.bfloat16):
+    with torch.autocast(device_type=device,dtype=torch.float16):
         logits,loss = model(x,y)
     loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(),1.0)
@@ -292,7 +294,10 @@ for step in range(max_steps):
         param_group['lr'] = lr
         
     optimizer.step()
-    print(f"step {i} , loss:{loss.item()}")
+    torch.cuda.synchronize()
+    t1= time.time()
+    dt = t1-t0
+    print(f"step {step} dt:{dt*1000:.2f}ms loss:{loss.item()}")
     
 #get logits
 # logits,loss = model(x,y)

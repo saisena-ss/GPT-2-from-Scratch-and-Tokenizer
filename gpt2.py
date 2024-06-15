@@ -21,7 +21,7 @@ class CasualSelfAttention(nn.Module):
         assert config.n_embed % config.n_head == 0
         self.c_attn = nn.Linear(config.n_embed,3*config.n_embed)
         self.c_proj = nn.Linear(config.n_embed,config.n_embed)
-        self.c_proj.NANO_GPT_FLAG = 1
+        self.c_proj.NANOGPT_SCALE_INIT = 1
         self.n_head = config.n_head
         self.n_embed = config.n_embed
         
@@ -91,6 +91,7 @@ class MLP(nn.Module):
         self.c_fc = nn.Linear(config.n_embed, 4*config.n_embed)
         self.gelu = nn.GELU(approximate='tanh')
         self.c_proj = nn.Linear(4*config.n_embed,config.n_embed)
+        self.c_proj.NANOGPT_SCALE_INIT = 1
         
     def forward(self,x):
         return self.c_proj(self.gelu(self.c_fc(x)))
@@ -119,7 +120,7 @@ class GPT(nn.Module):
         std = 0.02
         
         if isinstance(module,nn.Linear):
-            if hasattr(module,"NANO_GPT_FLAG"):
+            if hasattr(module,"NANOGPT_SCALE_INIT"):
                 std *= (2*self.config.n_layer)**-0.5
             torch.nn.init.normal_(module.weight,mean=0,std=std)
             if module.bias is not None:
@@ -243,17 +244,29 @@ class DataLoaderLite():
         
         return x,y
     
-train_loader = DataLoaderLite(B=16,T=1024)
 
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+  
 torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)    
 
 torch.set_float32_matmul_precision('high')
 
+
+total_batch_size = 524288 #2**19 tokens
+B = 16
+T = 1024
+assert total_batch_size % (B*T) == 0, "make sure total_batch_size is divisible by B*T"
+grad_accum_steps = total_batch_size//(B*T)
+print(f"grad_accum_steps:{grad_accum_steps}")
+
+train_loader = DataLoaderLite(B=B,T=T)
+
 # model = GPT.from_pretrained('gpt2')
 model = GPT(GPTconfig(vocab_size=50304))
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+
 model.to(device)
 # model = torch.compile(model)
 
@@ -281,13 +294,20 @@ def get_lr(it):
 
 for step in range(max_steps):
     t0 = time.time()
-    x,y = train_loader.next_batch()
-    x = x.to(device)
-    y = y.to(device)
     optimizer.zero_grad()
-    with torch.autocast(device_type=device,dtype=torch.float16):
-        logits,loss = model(x,y)
-    loss.backward()
+    
+    loss_accum = 0.0
+    #gradient accumulation
+    for micro_step in range(grad_accum_steps):
+        x,y = train_loader.next_batch()
+        x = x.to(device)
+        y = y.to(device)
+        with torch.autocast(device_type=device,dtype=torch.bfloat16):
+            logits,loss = model(x,y)
+        loss = loss/grad_accum_steps
+        loss_accum += loss.detach()
+        loss.backward()
+        
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(),1.0)
     lr = get_lr(step)
     for param_group in optimizer.param_groups:
@@ -297,7 +317,7 @@ for step in range(max_steps):
     torch.cuda.synchronize()
     t1= time.time()
     dt = t1-t0
-    print(f"step {step} dt:{dt*1000:.2f}ms loss:{loss.item()}")
+    print(f"step {step} dt:{dt*1000:.2f}ms loss:{loss_accum.item():.6f}")
     
 #get logits
 # logits,loss = model(x,y)

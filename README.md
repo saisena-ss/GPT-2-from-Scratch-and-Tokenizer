@@ -1,3 +1,14 @@
-# GPT-2-from-Scratch-and-Tokenizer
+# GPT-2 124M Pre-training
 
-I believe in the same spirit as Andrej's spirit - If I don't know how to implement or code from scratch then I don't understand it. So, I started building GPT-2 and it's tokenizer from scratch using his lecture videos on YouTube.
+This repo includes the code for implementing the GPT2 124M parameter model from scratch and pre-training it on a tiny Shakespeare dataset using torch's distributed data parallel.
+
+### Future work:
+- Add evaluation script.
+- Train the model on a large dataset like Fineweb.
+- Evaluate model on public datasets
+- Do Grouped Query Attention
+- Add Rotary Position Embeddings
+- Use scaling laws for the number of heads from the OpenELM paper.
+
+#### Acknowledgement:
+Thanks to Andrej Karpathy's lecture video on YouTube for explaining everything in detail.
